@@ -969,9 +969,9 @@ onMounted(async () => {
     <header class="max-w-6xl mx-auto px-4 py-8">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p class="text-sm text-indigo-200/80">Offline-first time tracker</p>
-          <h1 class="text-3xl font-semibold text-white">Time Tracker</h1>
-          <p class="text-xs text-slate-300/80">Entries are tied to your Supabase user.</p>
+          <p class="text-sm text-indigo-200/80"></p>
+          <h1 class="text-3xl font-semibold text-white">Time Scheduler</h1>
+          <p class="text-xs text-slate-300/80">Multi-user Scheduler</p>
         </div>
         <div class="flex flex-wrap gap-2 items-center">
           <span
@@ -1003,8 +1003,8 @@ onMounted(async () => {
       <section class="bg-white/5 border border-white/10 rounded-2xl shadow-xl shadow-indigo-900/30 p-6 backdrop-blur">
         <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 class="text-xl font-semibold text-white">Authentication</h2>
-            <p class="text-sm text-slate-200/80">Sign in to tie entries to your account.</p>
+            <h2 class="text-xl font-semibold text-white">Welcome {{ user ? user.email : '' }}</h2>
+            <p class="text-sm text-slate-200/80">Manage your shifts and schedule</p>
           </div>
           <div class="flex flex-wrap items-center gap-2 text-sm">
             <span v-if="user" class="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
@@ -1070,7 +1070,7 @@ onMounted(async () => {
         <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your worked shifts</h3>
-            <p class="text-sm text-slate-300">Confirmed shifts that have been completed ({{ workedEntries.length }} entries).</p>
+            <p class="text-sm text-slate-300">Confirmed shifts that have been completed ({{ workedEntries.length }} entries). -- This is based on the calendar you set below, please select calendar dates to filter.</p>
           </div>
         </div>
 
