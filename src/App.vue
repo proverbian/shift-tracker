@@ -4,6 +4,7 @@ import { useTimeCalculator } from './composables/useTimeCalculator'
 import { useOfflineStorage } from './composables/useOfflineStorage'
 import { useOfflineStorageShifts } from './composables/useOfflineStorageShifts'
 import { useSupabaseSync } from './composables/useSupabaseSync'
+import { useSupabaseSyncShifts } from './composables/useSupabaseSyncShifts'
 import { useSupabaseAuth } from './composables/useSupabaseAuth'
 import { useShifts } from './composables/useShifts'
 import { supabase } from './lib/supabaseClient'
@@ -133,6 +134,23 @@ const confirmedShiftsHours = computed(() => {
   return workedEntries.value.reduce((total, entry) => total + entry.hours, 0)
 })
 
+const currentMonthTotalHours = computed(() => {
+  if (!user.value) return 0
+  
+  // Filter shifts for the current calendar month being viewed
+  const monthShifts = shifts.value.filter(s => {
+    if (s.userId !== user.value?.id) return false
+    const shiftDate = new Date(s.date)
+    return shiftDate.getMonth() === currentMonth.value && shiftDate.getFullYear() === currentYear.value
+  })
+  
+  // Calculate total hours for all shifts in the month
+  return monthShifts.reduce((total, shift) => {
+    const hours = calculateHours(shift.date, shift.timeIn, shift.timeOut)
+    return total + hours
+  }, 0)
+})
+
 const workedEntries = computed(() => {
   const today = new Date().toISOString().slice(0, 10)
   let filtered = shifts.value
@@ -205,10 +223,13 @@ const fetchAdminEntries = async () => {
   if (!isAdmin.value || !supabaseEnabled || !isOnline.value) return
   adminLoading.value = true
   adminError.value = null
+  
+  // Fetch confirmed shifts for all users
   const { data, error } = await supabase
-    .from('entries')
+    .from('shifts')
     .select('*')
-    .order('created_at', { ascending: false })
+    .eq('status', 'confirmed')
+    .order('date', { ascending: false })
     .limit(500)
 
   adminLoading.value = false
@@ -223,7 +244,7 @@ const fetchAdminEntries = async () => {
     date: row.date,
     timeIn: row.time_in,
     timeOut: row.time_out,
-    hours: Number(row.hours ?? 0),
+    hours: calculateHours(row.date, row.time_in, row.time_out),
     userEmail: row.user_email,
     createdAt: row.created_at,
   }))
@@ -482,6 +503,21 @@ const confirmTodayShift = async (shiftId) => {
     entries.value.push(entry)
     await persistForCurrentUser()
     await syncPendingEntries()
+    
+    // Mark shift as unsynced so it gets synced with confirmed status
+    const confirmedShift = shifts.value.find(s => s.id === shiftId)
+    if (confirmedShift) {
+      confirmedShift.synced = false
+    }
+    
+    // Persist updated shifts array (now includes confirmed status)
+    const { persistShifts } = useOfflineStorageShifts()
+    await persistShifts(JSON.parse(JSON.stringify(shifts.value)), user.value.id)
+    
+    // Sync shifts (will now include the confirmed shift)
+    const { syncPendingShifts } = useSupabaseSyncShifts(shifts, persistShifts, user)
+    await syncPendingShifts()
+    
     feedback.value = 'Shift confirmed and logged.'
   }
 }
@@ -506,25 +542,36 @@ const deleteShift = async (shiftId) => {
 const handleShiftClick = async (shift) => {
   if (!user.value || shift.userId !== user.value.id) return
   
+  // Don't allow editing confirmed shifts
+  if (shift.status === 'confirmed') {
+    return
+  }
+  
+  // Get today's date in local timezone
   const today = new Date()
-  const shiftDate = new Date(shift.date)
+  today.setHours(0, 0, 0, 0)
+  
+  // Parse shift date in local timezone (not UTC)
+  const [year, month, day] = shift.date.split('-').map(Number)
+  const shiftDate = new Date(year, month - 1, day) // month is 0-indexed
+  
   const daysDiff = Math.floor((today - shiftDate) / (1000 * 60 * 60 * 24))
   
   // Auto-confirm if 2+ days past
-  if (daysDiff >= 2 && shift.status !== 'confirmed') {
+  if (daysDiff >= 2) {
     await confirmTodayShift(shift.id)
     return
   }
   
-  // If past date (including today), allow confirmation
-  if (shiftDate <= today && shift.status !== 'confirmed') {
+  // If past date (but NOT today), allow confirmation
+  if (shiftDate < today) {
     if (confirm('Confirm this shift as worked?')) {
       await confirmTodayShift(shift.id)
     }
     return
   }
   
-  // Future date - allow editing
+  // Today or future date - allow editing
   openEditShiftModal(shift)
 }
 
@@ -592,7 +639,6 @@ watch(
     entries.value = u ? await loadEntries(u.id) : []
     loadingEntries.value = false
     if (u) {
-      await loadUserShifts()
       if (isAdmin.value) {
         await fetchAllShifts()
       }
@@ -600,7 +646,7 @@ watch(
     if (u && isOnline.value) {
       await syncPendingEntries()
       await pullLatestForUser()
-      // Load shifts from Supabase after login
+      // Load shifts from Supabase after login for non-admin users
       if (!isAdmin.value) {
         const { data } = await supabase
           .from('shifts')
@@ -621,26 +667,18 @@ watch(
             synced: true,
           }))
           shifts.value = userShifts
-          
-          // Auto-confirm shifts that are 2+ days past
-          const today = new Date()
-          let updated = false
-          shifts.value.forEach(shift => {
-            if (shift.status !== 'confirmed') {
-              const shiftDate = new Date(shift.date)
-              const daysDiff = Math.floor((today - shiftDate) / (1000 * 60 * 60 * 24))
-              if (daysDiff >= 2) {
-                confirmTodayShift(shift.id)
-                updated = true
-              }
-            }
-          })
+          // Persist loaded shifts to IndexedDB
+          const { persistShifts } = useOfflineStorageShifts()
+          await persistShifts(JSON.parse(JSON.stringify(shifts.value)), u.id)
         }
       }
       if (isAdmin.value) {
         await fetchAdminEntries()
         await fetchAllShifts()
       }
+    } else if (u && !isOnline.value) {
+      // Load from IndexedDB when offline
+      await loadUserShifts()
     }
   },
 )
@@ -837,7 +875,7 @@ onMounted(async () => {
         <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your worked shifts</h3>
-            <p class="text-sm text-slate-300">Confirmed shifts that have been completed.</p>
+            <p class="text-sm text-slate-300">Confirmed shifts that have been completed ({{ workedEntries.length }} entries).</p>
           </div>
         </div>
 
@@ -908,10 +946,14 @@ onMounted(async () => {
           </div>
         </div>
       </section>
-      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 order-2">
+      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 order-2">
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
           <p class="text-sm text-slate-300">Confirmed shift hours</p>
           <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(confirmedShiftsHours) }}</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
+          <p class="text-sm text-slate-300">Calendar month hours</p>
+          <p class="mt-2 text-3xl font-semibold text-indigo-200">{{ formatHours(currentMonthTotalHours) }}</p>
         </div>
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
           <p class="text-sm text-slate-300">Scheduled shifts</p>

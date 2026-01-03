@@ -9,7 +9,7 @@ export function useSupabaseSyncShifts(shiftsRef, persistShifts = async () => {},
 
   const syncPendingShifts = async () => {
     if (!supabase || !isOnline.value || !userRef?.value?.id) return 0
-    const pending = shiftsRef.value.filter((shift) => shift.status === 'planned' && !shift.synced)
+    const pending = shiftsRef.value.filter((shift) => !shift.synced)
     if (!pending.length) return 0
 
     syncing.value = true
