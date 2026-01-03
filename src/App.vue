@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useTimeCalculator } from './composables/useTimeCalculator'
 import { useOfflineStorage } from './composables/useOfflineStorage'
+import { useOfflineStorageShifts } from './composables/useOfflineStorageShifts'
 import { useSupabaseSync } from './composables/useSupabaseSync'
 import { useSupabaseAuth } from './composables/useSupabaseAuth'
 import { useShifts } from './composables/useShifts'
@@ -37,6 +38,33 @@ const shiftForm = reactive({
 })
 
 const showShiftModal = ref(false)
+const editingShiftId = ref(null)
+
+// Calculate default date range based on current date
+const getDefaultDateRange = () => {
+  const today = new Date()
+  const year = today.getFullYear()
+  const month = today.getMonth()
+  const day = today.getDate()
+  
+  if (day < 15) {
+    // 1st to 14th
+    const start = new Date(year, month, 1).toISOString().slice(0, 10)
+    const end = new Date(year, month, 14).toISOString().slice(0, 10)
+    return { start, end }
+  } else {
+    // 15th to end of month
+    const start = new Date(year, month, 15).toISOString().slice(0, 10)
+    const end = new Date(year, month + 1, 0).toISOString().slice(0, 10)
+    return { start, end }
+  }
+}
+
+const defaultRange = getDefaultDateRange()
+const dateFilterStart = ref(defaultRange.start)
+const dateFilterEnd = ref(defaultRange.end)
+const adminDateFilterStart = ref(defaultRange.start)
+const adminDateFilterEnd = ref(defaultRange.end)
 
 const { user, isAdmin, authReady, authError, loading: authLoading, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
 
@@ -58,7 +86,19 @@ const isEditing = computed(() => !!editingEntryId.value)
 
 const employees = computed(() => {
   const map = new Map()
-  adminEntries.value.forEach(entry => {
+  const today = new Date().toISOString().slice(0, 10)
+  
+  // Filter admin entries by date range and only past confirmed shifts
+  let filtered = adminEntries.value.filter(entry => entry.date <= today)
+  
+  if (adminDateFilterStart.value) {
+    filtered = filtered.filter((entry) => entry.date >= adminDateFilterStart.value)
+  }
+  if (adminDateFilterEnd.value) {
+    filtered = filtered.filter((entry) => entry.date <= adminDateFilterEnd.value)
+  }
+  
+  filtered.forEach(entry => {
     const email = entry.userEmail || 'unknown'
     if (!map.has(email)) {
       map.set(email, { email, totalHours: 0, normalHours: 0, overnightHours: 0, entries: [] })
@@ -88,6 +128,37 @@ const statusBadgeClass = (status) =>
     : 'bg-amber-500/20 text-amber-100 border border-amber-500/40'
 
 const { shifts, loading: shiftsLoading, addShift, confirmShift, loadUserShifts, fetchAllShifts, todayShifts } = useShifts(user)
+
+const confirmedShiftsHours = computed(() => {
+  return workedEntries.value.reduce((total, entry) => total + entry.hours, 0)
+})
+
+const workedEntries = computed(() => {
+  const today = new Date().toISOString().slice(0, 10)
+  let filtered = shifts.value
+    .filter((s) => s.status === 'confirmed' && s.userId === user.value?.id && s.date <= today)
+  
+  // Apply date range filter
+  if (dateFilterStart.value) {
+    filtered = filtered.filter((s) => s.date >= dateFilterStart.value)
+  }
+  if (dateFilterEnd.value) {
+    filtered = filtered.filter((s) => s.date <= dateFilterEnd.value)
+  }
+  
+  return filtered
+    .map((shift) => ({
+      id: shift.id,
+      date: shift.date,
+      timeIn: shift.timeIn,
+      timeOut: shift.timeOut,
+      hours: calculateHours(shift.date, shift.timeIn, shift.timeOut),
+      status: 'synced',
+      userId: shift.userId,
+      userEmail: shift.userEmail,
+    }))
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+})
 
 const pullLatestForUser = async () => {
   if (!supabaseEnabled || !user.value || !isOnline.value) return
@@ -259,14 +330,24 @@ const backToEmployees = () => {
 }
 
 const openShiftModal = (dateStr) => {
+  editingShiftId.value = null
   shiftForm.date = dateStr
   shiftForm.timeIn = ''
   shiftForm.timeOut = ''
   showShiftModal.value = true
 }
 
+const openEditShiftModal = (shift) => {
+  editingShiftId.value = shift.id
+  shiftForm.date = shift.date
+  shiftForm.timeIn = shift.timeIn
+  shiftForm.timeOut = shift.timeOut
+  showShiftModal.value = true
+}
+
 const closeShiftModal = () => {
   showShiftModal.value = false
+  editingShiftId.value = null
   shiftForm.timeIn = ''
   shiftForm.timeOut = ''
   feedback.value = ''
@@ -325,8 +406,9 @@ const addPlannedShift = async () => {
     return
   }
   
-  // Check for overlapping shifts
+  // Check for overlapping shifts (exclude current shift if editing)
   const overlap = shifts.value.find((s) => {
+    if (s.id === editingShiftId.value) return false // Skip current shift when editing
     if (s.userId !== user.value.id || s.date !== shiftForm.date) return false
     
     // Convert times to comparable format (handle overnight shifts)
@@ -367,14 +449,30 @@ const addPlannedShift = async () => {
   }
   
   try {
-    await addShift(shiftForm.date, shiftForm.timeIn, shiftForm.timeOut)
+    if (editingShiftId.value) {
+      // Edit existing shift
+      const shiftIndex = shifts.value.findIndex(s => s.id === editingShiftId.value)
+      if (shiftIndex !== -1) {
+        shifts.value[shiftIndex].date = shiftForm.date
+        shifts.value[shiftIndex].timeIn = shiftForm.timeIn
+        shifts.value[shiftIndex].timeOut = shiftForm.timeOut
+        shifts.value[shiftIndex].synced = false
+        // Persist and sync changes
+        const { persistShifts } = useOfflineStorageShifts()
+        await persistShifts(JSON.parse(JSON.stringify(shifts.value)), user.value.id)
+        feedback.value = 'Shift updated.'
+      }
+    } else {
+      // Add new shift
+      await addShift(shiftForm.date, shiftForm.timeIn, shiftForm.timeOut)
+    }
     shiftForm.timeIn = ''
     shiftForm.timeOut = ''
     feedback.value = ''
     closeShiftModal()
   } catch (error) {
     feedback.value = `Error: ${error.message}`
-    console.error('Failed to add shift:', error)
+    console.error('Failed to save shift:', error)
   }
 }
 
@@ -386,6 +484,48 @@ const confirmTodayShift = async (shiftId) => {
     await syncPendingEntries()
     feedback.value = 'Shift confirmed and logged.'
   }
+}
+
+const deleteShift = async (shiftId) => {
+  if (!confirm('Are you sure you want to delete this shift?')) return
+  
+  const shiftIndex = shifts.value.findIndex(s => s.id === shiftId)
+  if (shiftIndex !== -1) {
+    shifts.value.splice(shiftIndex, 1)
+    const { persistShifts } = useOfflineStorageShifts()
+    await persistShifts(JSON.parse(JSON.stringify(shifts.value)), user.value.id)
+    
+    // Delete from Supabase if synced
+    if (supabase && isOnline.value) {
+      await supabase.from('shifts').delete().eq('id', shiftId)
+    }
+    feedback.value = 'Shift deleted.'
+  }
+}
+
+const handleShiftClick = async (shift) => {
+  if (!user.value || shift.userId !== user.value.id) return
+  
+  const today = new Date()
+  const shiftDate = new Date(shift.date)
+  const daysDiff = Math.floor((today - shiftDate) / (1000 * 60 * 60 * 24))
+  
+  // Auto-confirm if 2+ days past
+  if (daysDiff >= 2 && shift.status !== 'confirmed') {
+    await confirmTodayShift(shift.id)
+    return
+  }
+  
+  // If past date (including today), allow confirmation
+  if (shiftDate <= today && shift.status !== 'confirmed') {
+    if (confirm('Confirm this shift as worked?')) {
+      await confirmTodayShift(shift.id)
+    }
+    return
+  }
+  
+  // Future date - allow editing
+  openEditShiftModal(shift)
 }
 
 const currentMonth = ref(new Date().getMonth())
@@ -460,8 +600,46 @@ watch(
     if (u && isOnline.value) {
       await syncPendingEntries()
       await pullLatestForUser()
+      // Load shifts from Supabase after login
+      if (!isAdmin.value) {
+        const { data } = await supabase
+          .from('shifts')
+          .select('*')
+          .eq('user_id', u.id)
+          .order('date', { ascending: true })
+        if (data) {
+          const userShifts = data.map((row) => ({
+            id: row.id,
+            date: row.date,
+            timeIn: row.time_in,
+            timeOut: row.time_out,
+            status: row.status || 'planned',
+            confirmed: row.confirmed,
+            createdAt: row.created_at,
+            userId: row.user_id,
+            userEmail: row.user_email,
+            synced: true,
+          }))
+          shifts.value = userShifts
+          
+          // Auto-confirm shifts that are 2+ days past
+          const today = new Date()
+          let updated = false
+          shifts.value.forEach(shift => {
+            if (shift.status !== 'confirmed') {
+              const shiftDate = new Date(shift.date)
+              const daysDiff = Math.floor((today - shiftDate) / (1000 * 60 * 60 * 24))
+              if (daysDiff >= 2) {
+                confirmTodayShift(shift.id)
+                updated = true
+              }
+            }
+          })
+        }
+      }
       if (isAdmin.value) {
         await fetchAdminEntries()
+        await fetchAllShifts()
       }
     }
   },
@@ -520,7 +698,7 @@ onMounted(async () => {
       </div>
     </header>
 
-    <main class="max-w-6xl mx-auto px-4 pb-16 space-y-8">
+    <main class="max-w-6xl mx-auto px-4 pb-16 space-y-8 flex flex-col">
       <section class="bg-white/5 border border-white/10 rounded-2xl shadow-xl shadow-indigo-900/30 p-6 backdrop-blur">
         <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
@@ -586,11 +764,11 @@ onMounted(async () => {
 
       <section
         v-if="user && !isAdmin"
-        class="bg-white/5 border border-white/10 rounded-2xl shadow-xl shadow-indigo-900/30 p-6 backdrop-blur"
+        class="bg-white/5 border border-white/10 rounded-2xl shadow-xl shadow-indigo-900/30 p-6 backdrop-blur order-4"
       >
         <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 class="text-xl font-semibold text-white">Log your time</h2>
+            <h2 class="text-xl font-semibold text-white">Manually Log your time</h2>
             <p class="text-sm text-slate-200/80">Works offline. Syncs automatically when online.</p>
           </div>
           <div class="flex gap-2">
@@ -655,37 +833,47 @@ onMounted(async () => {
         <p v-if="feedback" class="mt-4 text-sm text-amber-100">{{ feedback }}</p>
         <p v-if="lastSyncError" class="mt-2 text-sm text-rose-200">Sync error: {{ lastSyncError }}</p>
       </section>
-
-      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
-          <p class="text-sm text-slate-300">Total hours</p>
-          <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(totalHours) }}</p>
-        </div>
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
-          <p class="text-sm text-slate-300">Entries</p>
-          <p class="mt-2 text-3xl font-semibold text-white">{{ entries.length }}</p>
-        </div>
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
-          <p class="text-sm text-slate-300">Pending sync</p>
-          <p class="mt-2 text-3xl font-semibold" :class="pendingCount ? 'text-amber-200' : 'text-emerald-200'">
-            {{ pendingCount }}
-          </p>
-        </div>
-      </section>
-
       <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl">
         <div class="flex items-center justify-between gap-4">
           <div>
-            <h3 class="text-lg font-semibold text-white">Your entries</h3>
-            <p class="text-sm text-slate-300">Saved offline and synced when online.</p>
+            <h3 class="text-lg font-semibold text-white">Your worked shifts</h3>
+            <p class="text-sm text-slate-300">Confirmed shifts that have been completed.</p>
           </div>
+        </div>
+
+        <!-- Date Range Filter -->
+        <div class="mt-4 flex flex-wrap gap-3 items-end">
+          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+            From
+            <input
+              v-model="dateFilterStart"
+              type="date"
+              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+            />
+          </label>
+          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+            To
+            <input
+              v-model="dateFilterEnd"
+              type="date"
+              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+            />
+          </label>
+          <button
+            v-if="dateFilterStart || dateFilterEnd"
+            type="button"
+            class="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
+            @click="dateFilterStart = ''; dateFilterEnd = ''"
+          >
+            Clear
+          </button>
         </div>
 
         <div v-if="loadingEntries" class="mt-6 text-sm text-slate-200">Loading entries…</div>
 
         <div v-else>
-          <div v-if="!entries.length" class="mt-6 rounded-xl border border-dashed border-white/10 bg-white/5 p-6 text-center text-slate-300">
-            No entries yet. Add your first time log above.
+          <div v-if="!workedEntries.length" class="mt-6 rounded-xl border border-dashed border-white/10 bg-white/5 p-6 text-center text-slate-300">
+            No worked shifts yet. Confirm your scheduled shifts on the day to log them.
           </div>
 
           <div v-else class="mt-6 overflow-x-auto">
@@ -701,25 +889,18 @@ onMounted(async () => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-white/5">
-                <tr v-for="entry in entries" :key="entry.id" class="hover:bg-white/5">
+                <tr v-for="entry in workedEntries" :key="entry.id" class="hover:bg-white/5">
                   <td class="px-3 py-3 align-top font-medium text-white">{{ entry.date }}</td>
                   <td class="px-3 py-3 align-top">{{ entry.timeIn }}</td>
                   <td class="px-3 py-3 align-top">{{ entry.timeOut }}</td>
                   <td class="px-3 py-3 align-top">{{ formatHours(entry.hours) }}</td>
                   <td class="px-3 py-3 align-top">
                     <span class="inline-flex rounded-full px-3 py-1 text-xs font-semibold" :class="statusBadgeClass(entry.status)">
-                      {{ entry.status === 'synced' ? 'Synced' : 'Pending' }}
+                      {{ entry.status === 'synced' ? 'Confirmed' : 'Pending' }}
                     </span>
                   </td>
                   <td class="px-3 py-3 align-top">
-                    <button
-                      v-if="user && entry.userId === user.id"
-                      type="button"
-                      class="text-xs font-semibold text-indigo-200 underline decoration-dotted hover:text-white"
-                      @click="startEdit(entry)"
-                    >
-                      Edit
-                    </button>
+                    <span class="text-xs text-slate-400">—</span>
                   </td>
                 </tr>
               </tbody>
@@ -727,9 +908,24 @@ onMounted(async () => {
           </div>
         </div>
       </section>
+      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 order-2">
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
+          <p class="text-sm text-slate-300">Confirmed shift hours</p>
+          <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(confirmedShiftsHours) }}</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
+          <p class="text-sm text-slate-300">Scheduled shifts</p>
+          <p class="mt-2 text-3xl font-semibold text-white">{{ shifts.filter(s => s.userId === user?.id).length }}</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
+          <p class="text-sm text-slate-300">Pending sync</p>
+          <p class="mt-2 text-3xl font-semibold" :class="pendingCount ? 'text-amber-200' : 'text-emerald-200'">
+            {{ pendingCount }}
+          </p>
+        </div>
+      </section>
 
-      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl">
-        <div class="flex items-center justify-between gap-4">
+      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-3">        <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your Shift Calendar</h3>
             <p class="text-sm text-slate-300">Tap a day to schedule a shift.</p>
@@ -790,22 +986,15 @@ onMounted(async () => {
               <div
                 v-for="shift in day.shifts"
                 :key="shift.id"
-                class="rounded px-1.5 py-1 text-[10px] border flex items-center justify-between gap-1"
+                class="rounded px-1.5 py-1 text-[10px] border flex items-center justify-between gap-1 cursor-pointer hover:opacity-80 transition"
                 :class="getUserColor(shift.userId)"
-                @click.stop
+                @click.stop="handleShiftClick(shift)"
               >
                 <div class="flex items-center gap-1 min-w-0">
                   <span class="font-bold">{{ getUserInitials(shift.userEmail) }}</span>
                   <span class="truncate">{{ format12Hour(shift.timeIn) }}-{{ format12Hour(shift.timeOut) }}</span>
                 </div>
-                <button
-                  v-if="day.dateStr === new Date().toISOString().slice(0, 10) && !shift.confirmed && shift.userId === user.value?.id"
-                  type="button"
-                  class="text-[10px] bg-white/20 px-1 rounded hover:bg-white/30 flex-shrink-0"
-                  @click="confirmTodayShift(shift.id)"
-                >
-                  ✓
-                </button>
+                <span v-if="shift.status === 'confirmed'" class="text-emerald-300 flex-shrink-0">✓</span>
               </div>
             </div>
           </div>
@@ -823,7 +1012,7 @@ onMounted(async () => {
           @click.stop
         >
           <div class="sticky top-0 bg-slate-800 border-b border-white/10 px-6 py-4 flex items-center justify-between">
-            <h3 class="text-lg font-semibold text-white">Schedule Shift</h3>
+            <h3 class="text-lg font-semibold text-white">{{ editingShiftId ? 'Edit Shift' : 'Schedule Shift' }}</h3>
             <button
               type="button"
               class="text-slate-400 hover:text-white transition"
@@ -870,6 +1059,7 @@ onMounted(async () => {
 
             <div class="flex gap-3 pt-2">
               <button
+                v-if="!editingShiftId"
                 type="button"
                 class="flex-1 rounded-lg bg-white/10 px-4 py-3 text-sm font-semibold text-white border border-white/20 hover:bg-white/15 transition"
                 @click="closeShiftModal"
@@ -877,12 +1067,20 @@ onMounted(async () => {
                 Cancel
               </button>
               <button
+                v-if="editingShiftId"
+                type="button"
+                class="rounded-lg bg-rose-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-rose-500/30 transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300"
+                @click="deleteShift(editingShiftId); closeShiftModal()"
+              >
+                Delete
+              </button>
+              <button
                 type="submit"
                 class="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:opacity-60"
                 :disabled="shiftsLoading"
               >
                 <span v-if="shiftsLoading" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
-                {{ shiftsLoading ? 'Saving…' : 'Save Shift' }}
+                {{ editingShiftId ? 'Update' : 'Save Shift' }}
               </button>
             </div>
           </form>
@@ -991,6 +1189,34 @@ onMounted(async () => {
         </div>
 
         <p v-if="adminError" class="mt-3 text-sm text-rose-200">{{ adminError }}</p>
+
+        <!-- Date Range Filter for Admin -->
+        <div class="mt-4 flex flex-wrap gap-3 items-end">
+          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+            From
+            <input
+              v-model="adminDateFilterStart"
+              type="date"
+              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+            />
+          </label>
+          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+            To
+            <input
+              v-model="adminDateFilterEnd"
+              type="date"
+              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+            />
+          </label>
+          <button
+            v-if="adminDateFilterStart || adminDateFilterEnd"
+            type="button"
+            class="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
+            @click="adminDateFilterStart = ''; adminDateFilterEnd = ''"
+          >
+            Clear
+          </button>
+        </div>
 
         <div v-if="!selectedEmployee">
           <!-- Employee List -->
