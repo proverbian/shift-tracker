@@ -78,7 +78,7 @@ const dateFilterEnd = ref(defaultRange.end)
 const adminDateFilterStart = ref(defaultRange.start)
 const adminDateFilterEnd = ref(defaultRange.end)
 
-const { user, userRole, isAdmin, isSuperAdmin, authReady, authError, loading: authLoading, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
+const { user, userRole, isAdmin, isSuperAdmin, authReady, authError, loading: authLoading, signingOut, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
 
 const persistForCurrentUser = async (list = entries.value) => {
   if (!user.value) return
@@ -994,10 +994,11 @@ onMounted(async () => {
             <button
               v-if="user"
               type="button"
-              class="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white border border-white/20 hover:bg-white/15"
+              class="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white border border-white/20 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+              :disabled="signingOut"
               @click="signOut"
             >
-              Sign out
+              {{ signingOut ? 'Signing out...' : 'Sign out' }}
             </button>
           </div>
         </div>
@@ -1042,77 +1043,6 @@ onMounted(async () => {
         <p v-if="authError" class="mt-3 text-sm text-rose-200">{{ authError }}</p>
       </section>
 
-      <section
-        v-if="user && !isAdmin"
-        class="bg-white/5 border border-white/10 rounded-2xl shadow-xl shadow-indigo-900/30 p-6 backdrop-blur order-4"
-      >
-        <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 class="text-xl font-semibold text-white">Manually Log your time</h2>
-            <p class="text-sm text-slate-200/80">Works offline. Syncs automatically when online.</p>
-          </div>
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-emerald-500/30 hover:bg-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-300 disabled:opacity-60"
-              :disabled="syncing || !pendingCount || !supabaseEnabled || !isOnline"
-              @click="triggerSync"
-            >
-              <span v-if="syncing" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
-              {{ syncing ? 'Syncing…' : 'Sync now' }}
-            </button>
-          </div>
-        </div>
-
-        <form class="mt-6 grid gap-4 md:grid-cols-4" @submit.prevent="addEntry">
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            Date
-            <input
-              v-model="form.date"
-              type="date"
-              class="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-              required
-            />
-          </label>
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            Time in
-            <input
-              v-model="form.timeIn"
-              type="time"
-              class="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-              required
-            />
-          </label>
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            Time out
-            <input
-              v-model="form.timeOut"
-              type="time"
-              class="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-              required
-            />
-          </label>
-          <div class="flex items-end">
-            <button
-              type="submit"
-              class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:-translate-y-px hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:opacity-60"
-              :disabled="saving || isAdmin"
-            >
-              <span v-if="saving" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
-              <template v-if="isAdmin">Admins cannot add</template>
-              <template v-else>{{ saving ? (isEditing ? 'Updating…' : 'Saving…') : (isEditing ? 'Update entry' : 'Save entry') }}</template>
-            </button>
-          </div>
-        </form>
-
-        <div v-if="isEditing" class="mt-3 flex items-center gap-3 text-sm text-amber-100">
-          Editing entry — update times and save, or
-          <button type="button" class="underline decoration-dotted" @click="cancelEdit">cancel</button>
-        </div>
-
-        <p v-if="feedback" class="mt-4 text-sm text-amber-100">{{ feedback }}</p>
-        <p v-if="lastSyncError" class="mt-2 text-sm text-rose-200">Sync error: {{ lastSyncError }}</p>
-      </section>
       <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl">
         <div class="flex items-center justify-between gap-4">
           <div>

@@ -9,6 +9,7 @@ export function useSupabaseAuth() {
   const authReady = ref(false)
   const authError = ref(null)
   const loading = ref(false)
+  const signingOut = ref(false)
   const supabaseEnabled = !!supabase
 
   const fetchUserRole = async (userId) => {
@@ -53,10 +54,15 @@ export function useSupabaseAuth() {
   }
 
   const signOut = async () => {
-    if (!supabase) return
-    await supabase.auth.signOut()
-    user.value = null
-    userRole.value = 'employee'
+    if (!supabase || signingOut.value) return
+    signingOut.value = true
+    try {
+      await supabase.auth.signOut()
+      user.value = null
+      userRole.value = 'employee'
+    } finally {
+      signingOut.value = false
+    }
   }
 
   const isAdmin = computed(() => {
@@ -102,6 +108,7 @@ export function useSupabaseAuth() {
     authReady,
     authError,
     loading,
+    signingOut,
     supabaseEnabled,
     signIn,
     signOut,

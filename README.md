@@ -11,11 +11,13 @@ Vue 3 + Tailwind CSS time-tracking app that works offline by default (IndexedDB 
   - **Employee**: Can log time and manage their own shifts
 - Email/password login with Supabase; entries are tied to the signed-in user
 - Log date, time in, and time out; automatic hour calculation with overnight shift support
+- Shift validation: minimum 10 minutes, maximum 16 hours, no identical time in/out, and **no overlapping shifts across any employees**
+- Employees can view **all shifts** on the calendar to find open slots; overtime/overnight shifts are highlighted with a red border and legend
 - Offline-first storage in IndexedDB with pending/synced status
 - Auto-sync to Supabase when online; manual "Sync now" button
 - Summary of total hours and pending counts
 - Shift scheduling: Employees can schedule planned shifts in advance, view a monthly calendar, and confirm shifts on the day to automatically log them
-- Admin calendar view to see all employee scheduled shifts
+- Admin calendar view to see all employee scheduled shifts (employees can view as read-only for availability)
 - Mobile-friendly UI with Tailwind
 
 ### Quick start
@@ -39,9 +41,14 @@ If Supabase values are missing, the app works offline but login/sync are disable
 
 ### Supabase tables
 
-**1. Run the user roles migration:**
+**1. Run the full schema/RLS script (updated):**
 
-Execute `supabase-migration-user-roles.sql` in your Supabase SQL editor to create the `user_roles` table with proper RLS policies.
+Run `supabase-migration-user-roles.sql` in the Supabase SQL editor. Before running, edit the file and replace **`your-superadmin@email.com`** with your actual `VITE_ADMIN_EMAIL` value. After running, execute the manual INSERT at the bottom of the file to add your superadmin role.
+
+This script now includes:
+- `user_roles` table with SECURITY DEFINER functions (`is_superadmin`, `get_user_role`, `get_all_user_roles`) to avoid RLS recursion
+- RLS policies that restrict writes to superadmin and allow users to read their own role (superadmin uses RPC to view all)
+- Shifts table RLS policies that let all authenticated users **view all shifts** (for scheduling) but only insert/update/delete their own shifts
 
 **2. Create the entries table:**
 
@@ -66,6 +73,8 @@ Create a table named `entries` with columns:
 - `time_out` text
 - `confirmed` boolean default false
 - `created_at` timestamptz default now()
+
+> After creating `shifts`, re-run `supabase-migration-user-roles.sql` to apply the shifts RLS policies from step 1.
 
 ### Scripts
 
