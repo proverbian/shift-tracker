@@ -148,14 +148,26 @@ const confirmedShiftsHours = computed(() => {
 const currentMonthTotalHours = computed(() => {
   if (!user.value) return 0
   
-  // Filter shifts for the current calendar month being viewed
-  const monthShifts = shifts.value.filter(s => {
+  const today = new Date().toISOString().slice(0, 10)
+  
+  // Filter shifts for the current calendar month being viewed (confirmed only)
+  let monthShifts = shifts.value.filter(s => {
     if (s.userId !== user.value?.id) return false
+    if (s.status !== 'confirmed') return false
+    if (s.date > today) return false // Only count past/today shifts
     const shiftDate = new Date(s.date)
     return shiftDate.getMonth() === currentMonth.value && shiftDate.getFullYear() === currentYear.value
   })
   
-  // Calculate total hours for all shifts in the month
+  // Apply date range filter (same as workedEntries)
+  if (dateFilterStart.value) {
+    monthShifts = monthShifts.filter((s) => s.date >= dateFilterStart.value)
+  }
+  if (dateFilterEnd.value) {
+    monthShifts = monthShifts.filter((s) => s.date <= dateFilterEnd.value)
+  }
+  
+  // Calculate total hours for filtered shifts
   return monthShifts.reduce((total, shift) => {
     const hours = calculateHours(shift.date, shift.timeIn, shift.timeOut)
     return total + hours
@@ -1054,7 +1066,7 @@ onMounted(async () => {
         <p v-if="authError" class="mt-3 text-sm text-rose-200">{{ authError }}</p>
       </section>
 
-      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl">
+      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-4">
         <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your worked shifts</h3>
@@ -1140,7 +1152,11 @@ onMounted(async () => {
         </div>
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
           <p class="text-sm text-slate-300">Scheduled shifts</p>
-          <p class="mt-2 text-3xl font-semibold text-white">{{ shifts.filter(s => s.userId === user?.id).length }}</p>
+          <p class="mt-2 text-3xl font-semibold text-white">{{ shifts.filter(s => {
+            if (s.userId !== user?.id) return false
+            const shiftDate = new Date(s.date)
+            return shiftDate.getMonth() === currentMonth && shiftDate.getFullYear() === currentYear
+          }).length }}</p>
         </div>
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
           <p class="text-sm text-slate-300">Pending sync</p>
@@ -1150,7 +1166,7 @@ onMounted(async () => {
         </div>
       </section>
 
-      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-3">        <div class="flex items-center justify-between gap-4">
+      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-1">        <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your Shift Calendar</h3>
             <p class="text-sm text-slate-300">Tap a day to schedule a shift. <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-red-400 rounded"></span> = Overnight shift</span></p>
