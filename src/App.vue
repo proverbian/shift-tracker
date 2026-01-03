@@ -535,40 +535,25 @@ const addPlannedShift = async () => {
   }
   
   // Check for overlapping shifts with ANY employee (exclude current shift if editing)
+  const toInterval = (dateStr, startStr, endStr) => {
+    const start = new Date(`${dateStr}T${startStr}`)
+    let end = new Date(`${dateStr}T${endStr}`)
+    if (endStr < startStr) {
+      // Overnight into next day
+      end.setDate(end.getDate() + 1)
+    }
+    return { start, end }
+  }
+
+  const newInterval = toInterval(shiftForm.date, shiftForm.timeIn, shiftForm.timeOut)
+
   const overlap = shifts.value.find((s) => {
     if (s.id === editingShiftId.value) return false // Skip current shift when editing
-    if (s.date !== shiftForm.date) return false // Only check same date
-    
-    // Convert times to comparable format (handle overnight shifts)
-    const newStart = shiftForm.timeIn
-    const newEnd = shiftForm.timeOut
-    const existingStart = s.timeIn
-    const existingEnd = s.timeOut
-    
-    // Check if times overlap: (StartA < EndB) AND (EndA > StartB)
-    // For same-day shifts (no overnight), simple comparison works
-    if (newEnd >= newStart && existingEnd >= existingStart) {
-      // Both are same-day shifts
-      return newStart < existingEnd && newEnd > existingStart
-    }
-    
-    // Handle overnight shifts
-    if (newEnd < newStart) {
-      // New shift is overnight
-      if (existingEnd < existingStart) {
-        // Both overnight - they always overlap
-        return true
-      } else {
-        // Existing is same-day, new is overnight
-        // Overlap if existing starts before midnight or ends after midnight
-        return existingStart < newEnd || existingEnd > newStart
-      }
-    } else if (existingEnd < existingStart) {
-      // Existing is overnight, new is same-day
-      return existingStart < newEnd || existingEnd > newStart
-    }
-    
-    return false
+
+    const existing = toInterval(s.date, s.timeIn, s.timeOut)
+
+    // Overlap if startA < endB AND endA > startB
+    return newInterval.start < existing.end && newInterval.end > existing.start
   })
   
   if (overlap) {
