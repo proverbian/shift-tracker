@@ -261,6 +261,23 @@ const fetchAdminEntries = async () => {
   }))
 }
 
+const deleteAdminShift = async (entry) => {
+  if (!isSuperAdmin.value || !supabaseEnabled || !isOnline.value) return
+  const confirmed = confirm('Delete this logged shift? This cannot be undone.')
+  if (!confirmed) return
+
+  const { error } = await supabase.from('shifts').delete().eq('id', entry.id)
+  if (error) {
+    feedback.value = `Failed to delete shift: ${error.message}`
+    return
+  }
+
+  // Update local lists so UI refreshes immediately
+  adminEntries.value = adminEntries.value.filter((e) => e.id !== entry.id)
+  shifts.value = shifts.value.filter((s) => s.id !== entry.id)
+  feedback.value = 'Shift deleted.'
+}
+
 const handleLogin = async () => {
   feedback.value = ''
   await signIn(loginForm.email, loginForm.password)
@@ -487,8 +504,8 @@ const format12Hour = (time24) => {
 
 const addPlannedShift = async () => {
   feedback.value = ''
-  if (!user.value || isAdmin.value) {
-    feedback.value = 'Only employees can schedule shifts.'
+  if (!user.value || (isAdmin.value && !isSuperAdmin.value)) {
+    feedback.value = 'Only employees (or superadmin) can schedule shifts.'
     return
   }
   if (!shiftForm.date || !shiftForm.timeIn || !shiftForm.timeOut) {
@@ -773,7 +790,16 @@ const closeUserModal = () => {
 }
 
 const handleShiftClick = async (shift) => {
-  if (!user.value || shift.userId !== user.value.id) return
+  if (!user.value) return
+  
+  // Superadmin can edit any shift directly
+  if (isSuperAdmin.value) {
+    openEditShiftModal(shift)
+    return
+  }
+  
+  // Non-superadmin: only own shifts
+  if (shift.userId !== user.value.id) return
   
   // Don't allow editing confirmed shifts
   if (shift.status === 'confirmed') {
@@ -964,7 +990,7 @@ onMounted(async () => {
             class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium border border-white/10 bg-white/5"
           >
             <span class="h-2 w-2 rounded-full" :class="supabaseEnabled ? 'bg-sky-400' : 'bg-slate-400'" />
-            {{ supabaseEnabled ? 'Supabase configured' : 'Supabase not set' }}
+            {{ supabaseEnabled ? 'Status: OK' : 'Status: Not configured' }}
           </span>
           <span
             v-if="pendingCount"
@@ -1211,7 +1237,18 @@ onMounted(async () => {
                   <span class="font-bold">{{ getUserInitials(shift.userEmail) }}</span>
                   <span class="truncate">{{ format12Hour(shift.timeIn) }}-{{ format12Hour(shift.timeOut) }}</span>
                 </div>
-                <span v-if="shift.status === 'confirmed'" class="text-emerald-300 flex-shrink-0">✓</span>
+                <div class="flex items-center gap-1">
+                  <span v-if="shift.status === 'confirmed'" class="text-emerald-300 flex-shrink-0">✓</span>
+                  <button
+                    v-if="isSuperAdmin"
+                    type="button"
+                    class="rounded bg-white/10 px-1 py-0.5 text-[9px] font-semibold text-white hover:bg-white/20 border border-white/20"
+                    @click.stop="openEditShiftModal(shift)"
+                    aria-label="Edit shift"
+                  >
+                    ✎
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1220,7 +1257,7 @@ onMounted(async () => {
 
       <!-- Shift Modal for Mobile -->
       <div
-        v-if="showShiftModal && user && !isAdmin"
+        v-if="showShiftModal && user && (isSuperAdmin || !isAdmin)"
         class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm"
         @click="closeShiftModal"
       >
@@ -1362,12 +1399,24 @@ onMounted(async () => {
                   getUserColor(shift.userId),
                   shift.timeOut < shift.timeIn ? 'border-2 border-red-400' : 'border'
                 ]"
+                @click.stop="handleShiftClick(shift)"
               >
                 <div class="flex items-center gap-1 min-w-0">
                   <span class="font-bold">{{ getUserInitials(shift.userEmail) }}</span>
                   <span class="truncate text-[10px]">{{ format12Hour(shift.timeIn) }}-{{ format12Hour(shift.timeOut) }}</span>
                 </div>
-                <span v-if="shift.confirmed" class="text-emerald-300 flex-shrink-0">✓</span>
+                <div class="flex items-center gap-1">
+                  <span v-if="shift.confirmed" class="text-emerald-300 flex-shrink-0">✓</span>
+                  <button
+                    v-if="isSuperAdmin"
+                    type="button"
+                    class="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold text-white hover:bg-white/20 border border-white/20"
+                    @click.stop="openEditShiftModal(shift)"
+                    aria-label="Edit shift"
+                  >
+                    ✎
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1496,6 +1545,7 @@ onMounted(async () => {
                   <th class="px-3 py-2 font-semibold">Time out</th>
                   <th class="px-3 py-2 font-semibold">Hours</th>
                   <th class="px-3 py-2 font-semibold">Shift Type</th>
+                  <th v-if="isSuperAdmin" class="px-3 py-2 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-white/5">
@@ -1511,6 +1561,15 @@ onMounted(async () => {
                     >
                       {{ entry.timeOut < entry.timeIn ? 'Overnight' : 'Normal' }}
                     </span>
+                  </td>
+                  <td v-if="isSuperAdmin" class="px-3 py-3 align-top text-right">
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 rounded-lg bg-rose-500/80 px-3 py-1 text-xs font-semibold text-white hover:bg-rose-600 border border-rose-400/60"
+                      @click="deleteAdminShift(entry)"
+                    >
+                      Delete
+                    </button>
                   </td>
                 </tr>
               </tbody>

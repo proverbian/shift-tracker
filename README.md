@@ -9,6 +9,7 @@ Vue 3 + Tailwind CSS time-tracking app that works offline by default (IndexedDB 
   - **Superadmin** (defined by `VITE_ADMIN_EMAIL`): Full access including user management
   - **Admin**: View-only access to employee logs
   - **Employee**: Can log time and manage their own shifts
+- **Superadmin cleanup**: Superadmin can delete logged shifts for cleanup or corrections
 - Email/password login with Supabase; entries are tied to the signed-in user
 - Log date, time in, and time out; automatic hour calculation with overnight shift support
 - Shift validation: minimum 10 minutes, maximum 16 hours, no identical time in/out, and **no overlapping shifts across any employees**

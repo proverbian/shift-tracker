@@ -194,6 +194,18 @@ CREATE POLICY "Users can delete own shifts"
   TO authenticated
   USING (auth.uid() = user_id);
 
+-- Superadmins can update any shift (for corrections/cleanup)
+CREATE POLICY "Superadmins can update shifts"
+  ON shifts FOR UPDATE
+  TO authenticated
+  USING (is_superadmin());
+
+-- Superadmins can delete any shift (for cleanup)
+CREATE POLICY "Superadmins can delete shifts"
+  ON shifts FOR DELETE
+  TO authenticated
+  USING (is_superadmin());
+
 -- ========================================
 -- IMPORTANT: MANUAL STEPS AFTER RUNNING THIS SCRIPT
 -- ========================================
