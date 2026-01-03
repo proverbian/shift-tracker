@@ -41,6 +41,17 @@ const shiftForm = reactive({
 const showShiftModal = ref(false)
 const editingShiftId = ref(null)
 
+// User Management
+const showUserModal = ref(false)
+const users = ref([])
+const loadingUsers = ref(false)
+const creatingUser = ref(false)
+const userForm = reactive({
+  email: '',
+  password: '',
+  role: 'employee',
+})
+
 // Calculate default date range based on current date
 const getDefaultDateRange = () => {
   const today = new Date()
@@ -67,7 +78,7 @@ const dateFilterEnd = ref(defaultRange.end)
 const adminDateFilterStart = ref(defaultRange.start)
 const adminDateFilterEnd = ref(defaultRange.end)
 
-const { user, isAdmin, authReady, authError, loading: authLoading, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
+const { user, userRole, isAdmin, isSuperAdmin, authReady, authError, loading: authLoading, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
 
 const persistForCurrentUser = async (list = entries.value) => {
   if (!user.value) return
@@ -273,10 +284,68 @@ const addEntry = async () => {
     return
   }
 
+  // Reject same time in and time out
+  if (form.timeIn === form.timeOut) {
+    feedback.value = 'Time in and time out cannot be the same.'
+    return
+  }
+
   const hours = calculateHours(form.date, form.timeIn, form.timeOut)
 
   if (hours <= 0) {
     feedback.value = 'Hours must be greater than zero.'
+    return
+  }
+
+  // Minimum 10 minutes (0.17 hours)
+  if (hours < 0.17) {
+    feedback.value = 'Minimum work duration is 10 minutes.'
+    return
+  }
+
+  // Maximum 16 hours
+  if (hours > 16) {
+    feedback.value = 'Maximum work duration is 16 hours.'
+    return
+  }
+
+  // Check for overlapping time entries (exclude current entry if editing)
+  const overlap = entries.value.find((entry) => {
+    if (entry.id === editingEntryId.value) return false // Skip current entry when editing
+    if (entry.userId !== user.value.id || entry.date !== form.date) return false
+    
+    // Convert times to comparable format
+    const newStart = form.timeIn
+    const newEnd = form.timeOut
+    const existingStart = entry.timeIn
+    const existingEnd = entry.timeOut
+    
+    // Check if times overlap
+    if (newEnd >= newStart && existingEnd >= existingStart) {
+      // Both are same-day entries
+      return newStart < existingEnd && newEnd > existingStart
+    }
+    
+    // Handle overnight entries
+    if (newEnd < newStart) {
+      // New entry is overnight
+      if (existingEnd < existingStart) {
+        // Both overnight - they always overlap
+        return true
+      } else {
+        // Existing is same-day, new is overnight
+        return existingStart < newEnd || existingEnd > newStart
+      }
+    } else if (existingEnd < existingStart) {
+      // Existing is overnight, new is same-day
+      return existingStart < newEnd || existingEnd > newStart
+    }
+    
+    return false
+  })
+  
+  if (overlap) {
+    feedback.value = `This time log overlaps with your existing entry: ${format12Hour(overlap.timeIn)} - ${format12Hour(overlap.timeOut)}`
     return
   }
 
@@ -426,11 +495,32 @@ const addPlannedShift = async () => {
     feedback.value = 'Please fill in date, time in, and time out.'
     return
   }
+
+  // Reject same time in and time out
+  if (shiftForm.timeIn === shiftForm.timeOut) {
+    feedback.value = 'Time in and time out cannot be the same.'
+    return
+  }
+
+  // Calculate shift duration
+  const shiftHours = calculateHours(shiftForm.date, shiftForm.timeIn, shiftForm.timeOut)
+
+  // Minimum 10 minutes (0.17 hours)
+  if (shiftHours < 0.17) {
+    feedback.value = 'Minimum shift duration is 10 minutes.'
+    return
+  }
+
+  // Maximum 16 hours
+  if (shiftHours > 16) {
+    feedback.value = 'Maximum shift duration is 16 hours.'
+    return
+  }
   
-  // Check for overlapping shifts (exclude current shift if editing)
+  // Check for overlapping shifts with ANY employee (exclude current shift if editing)
   const overlap = shifts.value.find((s) => {
     if (s.id === editingShiftId.value) return false // Skip current shift when editing
-    if (s.userId !== user.value.id || s.date !== shiftForm.date) return false
+    if (s.date !== shiftForm.date) return false // Only check same date
     
     // Convert times to comparable format (handle overnight shifts)
     const newStart = shiftForm.timeIn
@@ -465,7 +555,8 @@ const addPlannedShift = async () => {
   })
   
   if (overlap) {
-    feedback.value = `This shift overlaps with your existing shift: ${format12Hour(overlap.timeIn)} - ${format12Hour(overlap.timeOut)}`
+    const overlappingUser = overlap.userId === user.value.id ? 'your' : `${getUserInitials(overlap.userEmail)}'s`
+    feedback.value = `This shift overlaps with ${overlappingUser} existing shift: ${format12Hour(overlap.timeIn)} - ${format12Hour(overlap.timeOut)}`
     return
   }
   
@@ -539,6 +630,148 @@ const deleteShift = async (shiftId) => {
   }
 }
 
+const fetchUsers = async () => {
+  if (!isSuperAdmin.value || !supabaseEnabled || !isOnline.value) return
+  loadingUsers.value = true
+  
+  try {
+    // Use RPC function to bypass RLS and avoid recursion
+    const { data: rolesData, error: rolesError } = await supabase
+      .rpc('get_all_user_roles')
+    
+    if (rolesError) {
+      feedback.value = `Error fetching users: ${rolesError.message}`
+      return
+    }
+    
+    // Filter out superadmin from the list
+    users.value = (rolesData || []).filter(u => u.role !== 'superadmin')
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+const createUser = async () => {
+  if (!isSuperAdmin.value) {
+    feedback.value = 'Only superadmin can create users.'
+    return
+  }
+  
+  if (!userForm.email || !userForm.password) {
+    feedback.value = 'Please fill in email and password.'
+    return
+  }
+  
+  if (userForm.password.length < 6) {
+    feedback.value = 'Password must be at least 6 characters.'
+    return
+  }
+  
+  creatingUser.value = true
+  
+  try {
+    // Store current admin session
+    const { data: { session: adminSession } } = await supabase.auth.getSession()
+    
+    // Create user via Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email: userForm.email,
+      password: userForm.password,
+      options: {
+        emailRedirectTo: window.location.origin,
+        data: {
+          role: userForm.role,
+        }
+      }
+    })
+    
+    if (authError) {
+      feedback.value = `Error creating user: ${authError.message}`
+      creatingUser.value = false
+      return
+    }
+    
+    if (!authData.user) {
+      feedback.value = 'User creation failed.'
+      creatingUser.value = false
+      return
+    }
+    
+    // Immediately sign out the newly created user and restore admin session
+    await supabase.auth.signOut()
+    if (adminSession) {
+      await supabase.auth.setSession(adminSession)
+    }
+    
+    // Now add role to user_roles table (with admin session restored)
+    const { error: roleError } = await supabase
+      .from('user_roles')
+      .insert({
+        user_id: authData.user.id,
+        email: userForm.email,
+        role: userForm.role,
+      })
+    
+    if (roleError) {
+      feedback.value = `User created but role assignment failed: ${roleError.message}`
+      creatingUser.value = false
+      return
+    }
+    
+    feedback.value = `User created successfully with ${userForm.role} role.`
+    userForm.email = ''
+    userForm.password = ''
+    userForm.role = 'employee'
+    showUserModal.value = false
+    await fetchUsers()
+  } catch (error) {
+    feedback.value = `Error: ${error.message}`
+  } finally {
+    creatingUser.value = false
+  }
+}
+
+const deleteUser = async (userId, email) => {
+  if (!isSuperAdmin.value) {
+    feedback.value = 'Only superadmin can delete users.'
+    return
+  }
+  
+  if (!confirm(`Are you sure you want to delete user ${email}?`)) return
+  
+  try {
+    // Delete from user_roles table
+    const { error } = await supabase
+      .from('user_roles')
+      .delete()
+      .eq('user_id', userId)
+    
+    if (error) {
+      feedback.value = `Error deleting user: ${error.message}`
+    } else {
+      feedback.value = 'User deleted successfully.'
+      await fetchUsers()
+    }
+  } catch (error) {
+    feedback.value = `Error: ${error.message}`
+  }
+}
+
+const openUserModal = () => {
+  userForm.email = ''
+  userForm.password = ''
+  userForm.role = 'employee'
+  showUserModal.value = true
+}
+
+const closeUserModal = () => {
+  showUserModal.value = false
+  userForm.email = ''
+  userForm.password = ''
+  userForm.role = 'employee'
+  feedback.value = ''
+}
+
 const handleShiftClick = async (shift) => {
   if (!user.value || shift.userId !== user.value.id) return
   
@@ -591,9 +824,8 @@ const calendarDays = computed(() => {
 
   while (current <= lastDay || days.length % 7 !== 0) {
     const dateStr = current.toISOString().slice(0, 10)
-    const dayShifts = isAdmin.value
-      ? shifts.value.filter((s) => s.date === dateStr)
-      : shifts.value.filter((s) => s.date === dateStr && s.userId === user.value?.id)
+    // Show all shifts to everyone so employees can see availability
+    const dayShifts = shifts.value.filter((s) => s.date === dateStr)
     days.push({
       date: new Date(current),
       dateStr,
@@ -646,35 +878,33 @@ watch(
     if (u && isOnline.value) {
       await syncPendingEntries()
       await pullLatestForUser()
-      // Load shifts from Supabase after login for non-admin users
-      if (!isAdmin.value) {
-        const { data } = await supabase
-          .from('shifts')
-          .select('*')
-          .eq('user_id', u.id)
-          .order('date', { ascending: true })
-        if (data) {
-          const userShifts = data.map((row) => ({
-            id: row.id,
-            date: row.date,
-            timeIn: row.time_in,
-            timeOut: row.time_out,
-            status: row.status || 'planned',
-            confirmed: row.confirmed,
-            createdAt: row.created_at,
-            userId: row.user_id,
-            userEmail: row.user_email,
-            synced: true,
-          }))
-          shifts.value = userShifts
-          // Persist loaded shifts to IndexedDB
-          const { persistShifts } = useOfflineStorageShifts()
-          await persistShifts(JSON.parse(JSON.stringify(shifts.value)), u.id)
-        }
+      // Load all shifts from Supabase (so employees can see availability)
+      const { data } = await supabase
+        .from('shifts')
+        .select('*')
+        .order('date', { ascending: true })
+      if (data) {
+        const allShifts = data.map((row) => ({
+          id: row.id,
+          date: row.date,
+          timeIn: row.time_in,
+          timeOut: row.time_out,
+          status: row.status || 'planned',
+          confirmed: row.confirmed,
+          createdAt: row.created_at,
+          userId: row.user_id,
+          userEmail: row.user_email,
+          synced: true,
+        }))
+        shifts.value = allShifts
+        // Persist loaded shifts to IndexedDB
+        const { persistShifts } = useOfflineStorageShifts()
+        await persistShifts(JSON.parse(JSON.stringify(shifts.value)), u.id)
       }
+      // Mark shifts as loaded
+      shiftsLoading.value = false
       if (isAdmin.value) {
         await fetchAdminEntries()
-        await fetchAllShifts()
       }
     } else if (u && !isOnline.value) {
       // Load from IndexedDB when offline
@@ -694,9 +924,19 @@ watch(
   },
 )
 
+// Watch for superadmin login to auto-load users
+watch(() => isSuperAdmin.value, async (isSuperAdminNow) => {
+  if (isSuperAdminNow && supabaseEnabled && isOnline.value) {
+    await fetchUsers()
+  }
+})
+
 onMounted(async () => {
   if (supabaseEnabled && isAdmin.value && isOnline.value) {
     await fetchAdminEntries()
+  }
+  if (supabaseEnabled && isSuperAdmin.value && isOnline.value) {
+    await fetchUsers()
   }
 })
 </script>
@@ -747,7 +987,9 @@ onMounted(async () => {
             <span v-if="user" class="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
               <span class="h-2 w-2 rounded-full bg-emerald-400" />
               {{ user.email }}
-              <span v-if="isAdmin" class="rounded bg-indigo-500/80 px-2 py-0.5 text-xs uppercase">Admin</span>
+              <span v-if="isSuperAdmin" class="rounded bg-purple-500/80 px-2 py-0.5 text-xs uppercase">Super Admin</span>
+              <span v-else-if="isAdmin" class="rounded bg-indigo-500/80 px-2 py-0.5 text-xs uppercase">Admin</span>
+              <span v-else class="rounded bg-blue-500/80 px-2 py-0.5 text-xs uppercase">Employee</span>
             </span>
             <button
               v-if="user"
@@ -970,7 +1212,7 @@ onMounted(async () => {
       <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-3">        <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">Your Shift Calendar</h3>
-            <p class="text-sm text-slate-300">Tap a day to schedule a shift.</p>
+            <p class="text-sm text-slate-300">Tap a day to schedule a shift. <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-red-400 rounded"></span> = Overnight shift</span></p>
           </div>
           <div class="flex gap-2">
             <button
@@ -1028,8 +1270,11 @@ onMounted(async () => {
               <div
                 v-for="shift in day.shifts"
                 :key="shift.id"
-                class="rounded px-1.5 py-1 text-[10px] border flex items-center justify-between gap-1 cursor-pointer hover:opacity-80 transition"
-                :class="getUserColor(shift.userId)"
+                class="rounded px-1.5 py-1 text-[10px] flex items-center justify-between gap-1 cursor-pointer hover:opacity-80 transition"
+                :class="[
+                  getUserColor(shift.userId),
+                  shift.timeOut < shift.timeIn ? 'border-2 border-red-400' : 'border'
+                ]"
                 @click.stop="handleShiftClick(shift)"
               >
                 <div class="flex items-center gap-1 min-w-0">
@@ -1136,7 +1381,7 @@ onMounted(async () => {
         <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 class="text-xl font-semibold text-white">All Shifts Calendar</h2>
-            <p class="text-sm text-slate-200/80">View all employee scheduled shifts.</p>
+            <p class="text-sm text-slate-200/80">View all employee scheduled shifts. <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-red-400 rounded"></span> = Overnight shift</span></p>
           </div>
         </div>
 
@@ -1182,8 +1427,11 @@ onMounted(async () => {
               <div
                 v-for="shift in day.shifts"
                 :key="shift.id"
-                class="rounded px-2 py-1 text-xs border flex items-center justify-between gap-1"
-                :class="getUserColor(shift.userId)"
+                class="rounded px-2 py-1 text-xs flex items-center justify-between gap-1"
+                :class="[
+                  getUserColor(shift.userId),
+                  shift.timeOut < shift.timeIn ? 'border-2 border-red-400' : 'border'
+                ]"
               >
                 <div class="flex items-center gap-1 min-w-0">
                   <span class="font-bold">{{ getUserInitials(shift.userEmail) }}</span>
@@ -1340,6 +1588,158 @@ onMounted(async () => {
           </div>
         </div>
       </section>
+
+      <!-- User Management Section (Superadmin Only) -->
+      <section
+        v-if="user && isSuperAdmin"
+        class="rounded-2xl border border-white/10 bg-gradient-to-br from-purple-900/40 via-slate-900/40 to-blue-900/30 p-6 shadow-2xl shadow-purple-900/40"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <h3 class="text-lg font-semibold text-white">User Management</h3>
+            <p class="text-sm text-slate-200">Manage employee and admin accounts.</p>
+          </div>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              class="inline-flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              @click="openUserModal"
+            >
+              + Add User
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
+              :disabled="loadingUsers || !isOnline"
+              @click="fetchUsers"
+            >
+              <span v-if="loadingUsers" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
+              {{ loadingUsers ? 'Loading…' : 'Refresh' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="loadingUsers" class="mt-6 text-sm text-slate-200">Loading users…</div>
+
+        <div v-else-if="users.length" class="mt-6 overflow-x-auto">
+          <table class="min-w-full text-sm text-left text-slate-100">
+            <thead class="text-xs uppercase tracking-wide text-slate-300">
+              <tr>
+                <th class="px-3 py-2 font-semibold">Email</th>
+                <th class="px-3 py-2 font-semibold">Role</th>
+                <th class="px-3 py-2 font-semibold">Created</th>
+                <th class="px-3 py-2 font-semibold">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-white/5">
+              <tr v-for="usr in users" :key="usr.user_id" class="hover:bg-white/5">
+                <td class="px-3 py-3 align-top font-medium text-white">{{ usr.email }}</td>
+                <td class="px-3 py-3 align-top">
+                  <span
+                    class="inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize"
+                    :class="usr.role === 'admin' ? 'bg-purple-500/20 text-purple-200 border border-purple-500/40' : 'bg-blue-500/20 text-blue-200 border border-blue-500/40'"
+                  >
+                    {{ usr.role }}
+                  </span>
+                </td>
+                <td class="px-3 py-3 align-top text-sm text-slate-300">
+                  {{ new Date(usr.created_at).toLocaleDateString() }}
+                </td>
+                <td class="px-3 py-3 align-top">
+                  <button
+                    type="button"
+                    class="rounded-lg bg-rose-500/80 px-3 py-1 text-xs font-semibold text-white hover:bg-rose-600"
+                    @click="deleteUser(usr.user_id, usr.email)"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p v-else-if="!loadingUsers" class="mt-6 text-sm text-slate-200">No users found yet.</p>
+      </section>
+
+      <!-- User Creation Modal (Superadmin Only) -->
+      <div
+        v-if="showUserModal && user && isSuperAdmin"
+        class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm"
+        @click="closeUserModal"
+      >
+        <div
+          class="bg-slate-800 rounded-t-3xl sm:rounded-2xl border border-white/10 shadow-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto"
+          @click.stop
+        >
+          <div class="sticky top-0 bg-slate-800 border-b border-white/10 px-6 py-4 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-white">Create New User</h3>
+            <button
+              type="button"
+              class="text-slate-400 hover:text-white transition"
+              @click="closeUserModal"
+            >
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <form class="p-6 space-y-4" @submit.prevent="createUser">
+            <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+              Email
+              <input
+                v-model="userForm.email"
+                type="email"
+                class="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+                required
+                placeholder="user@example.com"
+              />
+            </label>
+            <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+              Password
+              <input
+                v-model="userForm.password"
+                type="password"
+                class="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+                required
+                placeholder="Min. 6 characters"
+              />
+            </label>
+            <label class="flex flex-col gap-2 text-sm text-slate-200/90">
+              Role
+              <select
+                v-model="userForm.role"
+                class="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+                required
+              >
+                <option value="employee">Employee</option>
+                <option value="admin">Admin (View Only)</option>
+              </select>
+            </label>
+
+            <p v-if="feedback" class="text-sm text-amber-100">{{ feedback }}</p>
+
+            <div class="flex gap-3 pt-2">
+              <button
+                type="button"
+                class="flex-1 rounded-lg bg-white/10 px-4 py-3 text-sm font-semibold text-white border border-white/20 hover:bg-white/15 transition"
+                @click="closeUserModal"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                class="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:opacity-60"
+                :disabled="creatingUser"
+              >
+                <span v-if="creatingUser" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
+                {{ creatingUser ? 'Creating…' : 'Create User' }}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
     </main>
   </div>
 </template>
