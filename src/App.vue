@@ -12,10 +12,9 @@ import { supabase } from './lib/supabaseClient'
 const { loadEntries, persistEntries } = useOfflineStorage()
 
 const entries = ref([])
-const adminEntries = ref([])
 const adminLoading = ref(false)
 const adminError = ref(null)
-const selectedEmployee = ref(null)
+const selectedEmployeeEmail = ref(null)
 const loadingEntries = ref(true)
 const saving = ref(false)
 const feedback = ref('')
@@ -75,8 +74,6 @@ const getDefaultDateRange = () => {
 const defaultRange = getDefaultDateRange()
 const dateFilterStart = ref(defaultRange.start)
 const dateFilterEnd = ref(defaultRange.end)
-const adminDateFilterStart = ref(defaultRange.start)
-const adminDateFilterEnd = ref(defaultRange.end)
 
 const { user, userRole, isAdmin, isSuperAdmin, authReady, authError, loading: authLoading, signingOut, supabaseEnabled, signIn, signOut } = useSupabaseAuth()
 
@@ -87,7 +84,7 @@ const persistForCurrentUser = async (list = entries.value) => {
 
 const { calculateHours, totalHours } = useTimeCalculator(entries)
 
-const { isOnline, syncing, lastSyncError, syncPendingEntries } = useSupabaseSync(
+const { isOnline, syncing, syncPendingEntries } = useSupabaseSync(
   entries,
   persistForCurrentUser,
   user,
@@ -98,28 +95,30 @@ const isEditing = computed(() => !!editingEntryId.value)
 
 const employees = computed(() => {
   const map = new Map()
-  const today = new Date().toISOString().slice(0, 10)
-  
-  // Filter admin entries by date range and only past confirmed shifts
-  let filtered = adminEntries.value.filter(entry => entry.date <= today)
-  
-  if (adminDateFilterStart.value) {
-    filtered = filtered.filter((entry) => entry.date >= adminDateFilterStart.value)
-  }
-  if (adminDateFilterEnd.value) {
-    filtered = filtered.filter((entry) => entry.date <= adminDateFilterEnd.value)
-  }
-  
-  filtered.forEach(entry => {
-    const email = entry.userEmail || 'unknown'
+  const monthStart = new Date(currentYear.value, currentMonth.value, 1).toISOString().slice(0, 10)
+  const monthEnd = new Date(currentYear.value, currentMonth.value + 1, 0).toISOString().slice(0, 10)
+
+  let filtered = shifts.value
+    .filter((shift) => shift.date >= monthStart && shift.date <= monthEnd)
+
+
+  filtered.forEach((shift) => {
+    const email = shift.userEmail || 'unknown'
     if (!map.has(email)) {
       map.set(email, { email, totalHours: 0, normalHours: 0, overnightHours: 0, entries: [] })
     }
     const emp = map.get(email)
-    emp.entries.push(entry)
-    const hours = Number(entry.hours) || 0
+    const hours = calculateHours(shift.date, shift.timeIn, shift.timeOut)
+    emp.entries.push({
+      id: shift.id,
+      date: shift.date,
+      timeIn: shift.timeIn,
+      timeOut: shift.timeOut,
+      hours,
+      userEmail: shift.userEmail,
+    })
     emp.totalHours += hours
-    if (entry.timeOut < entry.timeIn) {
+    if (shift.timeOut < shift.timeIn) {
       emp.overnightHours += hours
     } else {
       emp.normalHours += hours
@@ -128,10 +127,49 @@ const employees = computed(() => {
   return Array.from(map.values()).sort((a, b) => a.email.localeCompare(b.email))
 })
 
-const selectedEmployeeEntries = computed(() => {
-  if (!selectedEmployee.value) return []
-  return selectedEmployee.value.entries
+const selectedEmployeeShifts = computed(() => {
+  if (!selectedEmployeeEmail.value) return []
+  const monthStart = new Date(currentYear.value, currentMonth.value, 1).toISOString().slice(0, 10)
+  const monthEnd = new Date(currentYear.value, currentMonth.value + 1, 0).toISOString().slice(0, 10)
+
+  return shifts.value
+    .filter((shift) => {
+      if (shift.userEmail !== selectedEmployeeEmail.value) return false
+      if (shift.date < monthStart || shift.date > monthEnd) return false
+      return true
+    })
+    .map((shift) => ({
+      ...shift,
+      hours: calculateHours(shift.date, shift.timeIn, shift.timeOut),
+    }))
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
 })
+
+const selectedEmployeeTotals = computed(() => {
+  return selectedEmployeeShifts.value.reduce(
+    (acc, shift) => {
+      acc.totalHours += shift.hours
+      if (shift.timeOut < shift.timeIn) {
+        acc.overnightHours += shift.hours
+      } else {
+        acc.normalHours += shift.hours
+      }
+      return acc
+    },
+    { totalHours: 0, normalHours: 0, overnightHours: 0 },
+  )
+})
+
+const selectedEmployeeData = computed(() => {
+  if (!selectedEmployeeEmail.value) return null
+  return {
+    email: selectedEmployeeEmail.value,
+    ...selectedEmployeeTotals.value,
+    entries: selectedEmployeeShifts.value,
+  }
+})
+
+const selectedEmployeeEntries = computed(() => selectedEmployeeData.value?.entries ?? [])
 
 const formatHours = (hours) => Number(hours ?? 0).toFixed(2)
 const statusBadgeClass = (status) =>
@@ -139,10 +177,17 @@ const statusBadgeClass = (status) =>
     ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/40'
     : 'bg-amber-500/20 text-amber-100 border border-amber-500/40'
 
-const { shifts, loading: shiftsLoading, addShift, confirmShift, loadUserShifts, fetchAllShifts, todayShifts } = useShifts(user)
+const { shifts, loading: shiftsLoading, addShift, confirmShift, loadUserShifts, fetchAllShifts, todayShifts, lastSyncError } = useShifts(user)
 
 const confirmedShiftsHours = computed(() => {
-  return workedEntries.value.reduce((total, entry) => total + entry.hours, 0)
+  if (!user.value) return 0
+  const today = new Date().toISOString().slice(0, 10)
+  return shifts.value.reduce((total, shift) => {
+    if (shift.userId !== user.value?.id || shift.status !== 'confirmed' || shift.date > today) {
+      return total
+    }
+    return total + calculateHours(shift.date, shift.timeIn, shift.timeOut)
+  }, 0)
 })
 
 const currentMonthTotalHours = computed(() => {
@@ -242,35 +287,18 @@ const pullLatestForUser = async () => {
   await persistForCurrentUser()
 }
 
-const fetchAdminEntries = async () => {
+const refreshAdminShifts = async () => {
   if (!isAdmin.value || !supabaseEnabled || !isOnline.value) return
   adminLoading.value = true
   adminError.value = null
-  
-  // Fetch confirmed shifts for all users
-  const { data, error } = await supabase
-    .from('shifts')
-    .select('*')
-    .eq('status', 'confirmed')
-    .order('date', { ascending: false })
-    .limit(500)
 
-  adminLoading.value = false
+  await fetchAllShifts()
 
-  if (error) {
-    adminError.value = error.message
-    return
+  if (lastSyncError.value) {
+    adminError.value = lastSyncError.value
   }
 
-  adminEntries.value = data.map((row) => ({
-    id: row.id,
-    date: row.date,
-    timeIn: row.time_in,
-    timeOut: row.time_out,
-    hours: calculateHours(row.date, row.time_in, row.time_out),
-    userEmail: row.user_email,
-    createdAt: row.created_at,
-  }))
+  adminLoading.value = false
 }
 
 const deleteAdminShift = async (entry) => {
@@ -284,8 +312,7 @@ const deleteAdminShift = async (entry) => {
     return
   }
 
-  // Update local lists so UI refreshes immediately
-  adminEntries.value = adminEntries.value.filter((e) => e.id !== entry.id)
+  // Update local shifts so UI refreshes immediately
   shifts.value = shifts.value.filter((s) => s.id !== entry.id)
   feedback.value = 'Shift deleted.'
 }
@@ -441,11 +468,11 @@ const cancelEdit = () => {
 }
 
 const selectEmployee = (emp) => {
-  selectedEmployee.value = emp
+  selectedEmployeeEmail.value = emp.email
 }
 
 const backToEmployees = () => {
-  selectedEmployee.value = null
+  selectedEmployeeEmail.value = null
 }
 
 const openShiftModal = (dateStr) => {
@@ -605,6 +632,7 @@ const addPlannedShift = async () => {
 const confirmTodayShift = async (shiftId) => {
   const entry = await confirmShift(shiftId)
   if (entry) {
+    entry.hours = calculateHours(entry.date, entry.timeIn, entry.timeOut)
     entries.value.push(entry)
     await persistForCurrentUser()
     await syncPendingEntries()
@@ -860,6 +888,43 @@ const calendarDays = computed(() => {
   return days
 })
 
+const allShiftsCalendarDays = computed(() => {
+  const year = currentYear.value
+  const month = currentMonth.value
+  const firstDay = new Date(year, month, 1)
+  const lastDay = new Date(year, month + 1, 0)
+  const startDate = new Date(firstDay)
+  startDate.setDate(startDate.getDate() - firstDay.getDay())
+
+  const days = []
+  const current = new Date(startDate)
+
+  while (current <= lastDay || days.length % 7 !== 0) {
+    const dateStr = current.toISOString().slice(0, 10)
+    const dayShifts = shifts.value.filter((s) => s.date === dateStr)
+    days.push({
+      date: new Date(current),
+      dateStr,
+      shifts: dayShifts,
+      isCurrentMonth: current.getMonth() === month,
+    })
+    current.setDate(current.getDate() + 1)
+  }
+  return days
+})
+
+const currentMonthShiftHours = computed(() => {
+  if (!user.value) return 0
+  const year = currentYear.value
+  const month = currentMonth.value
+  return shifts.value.reduce((total, shift) => {
+    if (shift.userId !== user.value?.id) return total
+    const shiftDate = new Date(shift.date)
+    if (shiftDate.getFullYear() !== year || shiftDate.getMonth() !== month) return total
+    return total + calculateHours(shift.date, shift.timeIn, shift.timeOut)
+  }, 0)
+})
+
 const prevMonth = () => {
   if (currentMonth.value === 0) {
     currentMonth.value = 11
@@ -926,9 +991,6 @@ watch(
       }
       // Mark shifts as loaded
       shiftsLoading.value = false
-      if (isAdmin.value) {
-        await fetchAdminEntries()
-      }
     } else if (u && !isOnline.value) {
       // Load from IndexedDB when offline
       await loadUserShifts()
@@ -936,13 +998,20 @@ watch(
   },
 )
 
+watch([currentMonth, currentYear, employees], () => {
+  if (!selectedEmployeeEmail.value) return
+  const exists = employees.value.some((emp) => emp.email === selectedEmployeeEmail.value)
+  if (!exists) {
+    selectedEmployeeEmail.value = null
+  }
+})
+
 watch(
   () => isOnline.value,
   async (online) => {
     if (online && user.value) {
       await syncPendingEntries()
       await pullLatestForUser()
-      if (isAdmin.value) await fetchAdminEntries()
     }
   },
 )
@@ -956,7 +1025,7 @@ watch(() => isSuperAdmin.value, async (isSuperAdminNow) => {
 
 onMounted(async () => {
   if (supabaseEnabled && isAdmin.value && isOnline.value) {
-    await fetchAdminEntries()
+    await fetchAllShifts()
   }
   if (supabaseEnabled && isSuperAdmin.value && isOnline.value) {
     await fetchUsers()
@@ -1065,90 +1134,10 @@ onMounted(async () => {
 
         <p v-if="authError" class="mt-3 text-sm text-rose-200">{{ authError }}</p>
       </section>
-
-      <section v-if="user && !isAdmin" class="rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl order-4">
-        <div class="flex items-center justify-between gap-4">
-          <div>
-            <h3 class="text-lg font-semibold text-white">Your worked shifts</h3>
-            <p class="text-sm text-slate-300">Confirmed shifts that have been completed ({{ workedEntries.length }} entries). -- This is based on the calendar you set below, please select calendar dates to filter.</p>
-          </div>
-        </div>
-
-        <!-- Date Range Filter -->
-        <div class="mt-4 flex flex-wrap gap-3 items-end">
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            From
-            <input
-              v-model="dateFilterStart"
-              type="date"
-              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-            />
-          </label>
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            To
-            <input
-              v-model="dateFilterEnd"
-              type="date"
-              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-            />
-          </label>
-          <button
-            v-if="dateFilterStart || dateFilterEnd"
-            type="button"
-            class="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
-            @click="dateFilterStart = ''; dateFilterEnd = ''"
-          >
-            Clear
-          </button>
-        </div>
-
-        <div v-if="loadingEntries" class="mt-6 text-sm text-slate-200">Loading entries…</div>
-
-        <div v-else>
-          <div v-if="!workedEntries.length" class="mt-6 rounded-xl border border-dashed border-white/10 bg-white/5 p-6 text-center text-slate-300">
-            No worked shifts yet. Confirm your scheduled shifts on the day to log them.
-          </div>
-
-          <div v-else class="mt-6 overflow-x-auto">
-            <table class="min-w-full text-sm text-left text-slate-100">
-              <thead class="text-xs uppercase tracking-wide text-slate-300">
-                <tr>
-                  <th class="px-3 py-2 font-semibold">Date</th>
-                  <th class="px-3 py-2 font-semibold">Time in</th>
-                  <th class="px-3 py-2 font-semibold">Time out</th>
-                  <th class="px-3 py-2 font-semibold">Hours</th>
-                  <th class="px-3 py-2 font-semibold">Status</th>
-                  <th class="px-3 py-2 font-semibold">Actions</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-white/5">
-                <tr v-for="entry in workedEntries" :key="entry.id" class="hover:bg-white/5">
-                  <td class="px-3 py-3 align-top font-medium text-white">{{ entry.date }}</td>
-                  <td class="px-3 py-3 align-top">{{ entry.timeIn }}</td>
-                  <td class="px-3 py-3 align-top">{{ entry.timeOut }}</td>
-                  <td class="px-3 py-3 align-top">{{ formatHours(entry.hours) }}</td>
-                  <td class="px-3 py-3 align-top">
-                    <span class="inline-flex rounded-full px-3 py-1 text-xs font-semibold" :class="statusBadgeClass(entry.status)">
-                      {{ entry.status === 'synced' ? 'Confirmed' : 'Pending' }}
-                    </span>
-                  </td>
-                  <td class="px-3 py-3 align-top">
-                    <span class="text-xs text-slate-400">—</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 order-2">
+      <section v-if="user && !isAdmin" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 order-1">
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
-          <p class="text-sm text-slate-300">Confirmed shift hours</p>
-          <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(confirmedShiftsHours) }}</p>
-        </div>
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
-          <p class="text-sm text-slate-300">Calendar month hours</p>
-          <p class="mt-2 text-3xl font-semibold text-indigo-200">{{ formatHours(currentMonthTotalHours) }}</p>
+          <p class="text-sm text-slate-300">Total logged hours</p>
+          <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(currentMonthShiftHours) }}</p>
         </div>
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
           <p class="text-sm text-slate-300">Scheduled shifts</p>
@@ -1170,6 +1159,7 @@ onMounted(async () => {
           <div>
             <h3 class="text-lg font-semibold text-white">Your Shift Calendar</h3>
             <p class="text-sm text-slate-300">Tap a day to schedule a shift. <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-red-400 rounded"></span> = Overnight shift</span></p>
+            <p class="text-sm text-slate-300">Total logged hours this month: {{ currentMonthShiftHours.toFixed(2) }}</p>
           </div>
           <div class="flex gap-2">
             <button
@@ -1192,7 +1182,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="mt-6 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-300">
+        <div class="mt-6 hidden md:grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-300">
           <div>S</div>
           <div>M</div>
           <div>T</div>
@@ -1202,7 +1192,7 @@ onMounted(async () => {
           <div>S</div>
         </div>
 
-        <div class="mt-2 grid grid-cols-7 gap-1">
+        <div class="mt-2 grid grid-cols-2 md:grid-cols-7 gap-1">
           <div
             v-for="day in calendarDays"
             :key="day.dateStr"
@@ -1373,7 +1363,7 @@ onMounted(async () => {
           </button>
         </div>
 
-        <div class="mt-6 grid grid-cols-7 gap-2 text-center text-sm font-semibold text-slate-300">
+        <div class="mt-6 hidden md:grid grid-cols-7 gap-2 text-center text-sm font-semibold text-slate-300">
           <div>Sun</div>
           <div>Mon</div>
           <div>Tue</div>
@@ -1383,9 +1373,9 @@ onMounted(async () => {
           <div>Sat</div>
         </div>
 
-        <div class="mt-2 grid grid-cols-7 gap-2">
+        <div class="mt-2 grid grid-cols-2 md:grid-cols-7 gap-2">
           <div
-            v-for="day in calendarDays"
+            v-for="day in allShiftsCalendarDays"
             :key="day.dateStr"
             class="min-h-[120px] rounded-lg border border-white/10 bg-white/5 p-2 text-left"
             :class="{ 'bg-indigo-500/10 border-indigo-400/30': !day.isCurrentMonth }"
@@ -1431,15 +1421,15 @@ onMounted(async () => {
         <div class="flex items-center justify-between gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white">
-              {{ selectedEmployee ? `Logs for ${selectedEmployee.email}` : 'Admin — All Employees' }}
+              {{ selectedEmployeeData ? `Logs for ${selectedEmployeeData.email}` : 'Admin — All Employees' }}
             </h3>
             <p class="text-sm text-slate-200">
-              {{ selectedEmployee ? 'Time logs and totals for this employee.' : 'Click an employee to view their logs.' }}
+              {{ selectedEmployeeData ? 'Time logs and totals for this employee.' : 'Click an employee to view their logs.' }}
             </p>
           </div>
           <div class="flex gap-2">
             <button
-              v-if="selectedEmployee"
+              v-if="selectedEmployeeData"
               type="button"
               class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
               @click="backToEmployees"
@@ -1450,7 +1440,7 @@ onMounted(async () => {
               type="button"
               class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
               :disabled="adminLoading || !isOnline"
-              @click="fetchAdminEntries"
+              @click="refreshAdminShifts"
             >
               <span v-if="adminLoading" class="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
               {{ adminLoading ? 'Refreshing…' : 'Refresh' }}
@@ -1460,35 +1450,7 @@ onMounted(async () => {
 
         <p v-if="adminError" class="mt-3 text-sm text-rose-200">{{ adminError }}</p>
 
-        <!-- Date Range Filter for Admin -->
-        <div class="mt-4 flex flex-wrap gap-3 items-end">
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            From
-            <input
-              v-model="adminDateFilterStart"
-              type="date"
-              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-            />
-          </label>
-          <label class="flex flex-col gap-2 text-sm text-slate-200/90">
-            To
-            <input
-              v-model="adminDateFilterEnd"
-              type="date"
-              class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white text-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-            />
-          </label>
-          <button
-            v-if="adminDateFilterStart || adminDateFilterEnd"
-            type="button"
-            class="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white border border-white/20 hover:bg-white/15"
-            @click="adminDateFilterStart = ''; adminDateFilterEnd = ''"
-          >
-            Clear
-          </button>
-        </div>
-
-        <div v-if="!selectedEmployee">
+        <div v-if="!selectedEmployeeData">
           <!-- Employee List -->
           <div v-if="employees.length" class="mt-6 overflow-x-auto">
             <table class="min-w-full text-sm text-left text-slate-100">
@@ -1525,15 +1487,15 @@ onMounted(async () => {
           <div class="mt-6 grid gap-4 sm:grid-cols-3">
             <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
               <p class="text-sm text-slate-300">Total Hours</p>
-              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployee.totalHours) }}</p>
+              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployeeData.totalHours) }}</p>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
               <p class="text-sm text-slate-300">Normal Hours</p>
-              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployee.normalHours) }}</p>
+              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployeeData.normalHours) }}</p>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-lg">
               <p class="text-sm text-slate-300">Overnight Hours</p>
-              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployee.overnightHours) }}</p>
+              <p class="mt-2 text-3xl font-semibold text-white">{{ formatHours(selectedEmployeeData.overnightHours) }}</p>
             </div>
           </div>
 
